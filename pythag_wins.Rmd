@@ -1,0 +1,155 @@
+---
+title: "Pythagorean Wins"
+output: html_document
+---
+
+```{r include = FALSE}
+knitr::opts_chunk$set(echo = FALSE, error = FALSE, warning = FALSE, message = FALSE)
+```
+
+```{r import}
+library(Lahman)
+library(tidyverse)
+library(baseballr)
+library(ggrepel)
+library(kableExtra)
+
+# Lahman's is only updated through 2016, so pulling team IDs from the 2016 season to run through
+# baseballr team_results_bref function
+team_ids <- Teams %>%
+  filter(yearID == max(yearID)) %>%
+  pull(teamIDBR)
+
+years <- 2014:2018
+
+grid_data <- expand.grid(team_ids = team_ids, seasons = years)
+```
+
+## Getting the Data
+
+Game results from Baseball Reference via the **baseballr** package provides an easy way to gather 
+standings information for each team. The **Lahman** package is another option for exploring standings
+and runs data for a Pythagorean wins estimate, but data is only available through the 2016 season. 
+By using the function **team_results_bref()**, I was able to gather game log information for each 
+team over the past five seasons (2014 to 2018). In order to loop through the **team_results_bref()** 
+function, I first had to extract each team’s Baseball Reference ID which I did rely on **Lahman** for.
+All combinations of team IDs and seasons were input into a data frame in order to loop through the 
+function, storing the results of each team for each season in a list. 
+
+```{r generate-grid}
+set.seed(123)
+
+grid_data %>% 
+  sample_n(5) %>%
+  knitr::kable(col.names = c("Team IDs", "Season"))
+```
+
+When running through the scraping function from **baseballr** a list is returned. Each element of the
+list contains game log information for each team and for each season between 2014 and 2018. 
+
+Here's an example of what is returned:
+
+```{r extract-data}
+season_data <- apply(grid_data, 1, function(data) team_results_bref(data[["team_ids"]], data[["seasons"]]))
+
+season_data[[1]] %>% 
+  head() %>% 
+  select(Gm, Date, Tm, H_A, Opp, Result, R, RA, Record, GB, Year) %>%
+  mutate(RA = as.numeric(RA)) %>%
+  knitr::kable() %>%
+  kable_styling(full_width = F)
+```
+
+With game log information now available, the next step was to aggregate the information for each team 
+and each season. Once this aggregation was complete, the number of wins, losses, runs scored, and 
+runs allowed for each team was available for the last 5 seasons.
+
+```{r wrangle}
+# estimate exponent for Pythagorean wins formula -----
+pythag_data <- bind_rows(season_data) %>% 
+  group_by(Tm, Year) %>%
+  filter(as.numeric(Gm) < 163) %>%
+  summarize(runs = sum(R), 
+            runs_allowed = sum(as.numeric(RA)), 
+            wins = sum(str_detect(Result, "W.*")), 
+            losses = sum(str_detect(Result, "L.*"))) %>%
+  mutate(total_games = wins + losses,
+         win_pct = wins/total_games,
+         logWratio = log(wins/losses),
+         logRratio = log(runs/runs_allowed)) %>%
+  ungroup()
+```
+
+
+Using this data, linear regression was run to determine which exponent provides the best-fit for the 
+Pythagorean wins formula. The premise is to predict the team's win percentage/win total using only the
+number of runs scored and runs allowed. In a modeling setting, in order to return the best-fit exponent
+the dependent variable becomes the natural log of the team's win ratio (*log(wins/losses)*) while 
+the independent variable is taken as the natural log of the team's runs to runs allowed (*log(runs/runs_allowed)*).
+
+```{r fit-model, echo=TRUE}
+pythag_fit <- lm(logWratio ~ 0 + logRratio, data = pythag_data)
+```
+
+It was determined that the exponent providing the best-fit for the last 5 seasons was 1.71, a large
+difference than from Bill James’ original exponent of 2. 
+
+Applying the Pythagorean formula for the past five years with an exponent of 1.71 provides a mean 
+absolute error of about 3 games. Thus, we can expect predictions to typically be within 3 games of 
+the actual results for that season. The plot below indicates where the Chicago White Sox have fallen 
+relative to its Pythagorean wins estimate over the last 5 years.
+
+```{r plot, fig.align = "center"}
+pythag_exp <- round(as.numeric(pythag_fit$coefficients), 2)
+
+pythag_data$est_winpct <- pythag_data$runs^pythag_exp / (pythag_data$runs^pythag_exp + pythag_data$runs_allowed^pythag_exp)
+
+# Plot how the White Sox have faired in comparison to the Pythagorean Wins estimate -----
+pythag_data <- pythag_data %>% 
+  mutate(white_sox_ind = Tm == "CHW",
+         est_wins = round(est_winpct*total_games))
+
+ggplot(arrange(pythag_data, white_sox_ind), aes(est_wins, wins)) +
+  geom_point(aes(color = white_sox_ind), size = 1.5) +
+  geom_smooth(method = "lm", se = FALSE, color = "blue3", size = 0.5, linetype = "dashed") +
+  geom_text_repel(data = filter(pythag_data, white_sox_ind == TRUE), 
+                  aes(est_wins, wins, label = Year), size = 4) +
+  scale_color_manual(values = c("grey","red4")) +
+  theme(legend.position = "none",
+        plot.background = element_rect(fill = "gray95"),
+        panel.background = element_rect(fill = "gray95"),
+        panel.grid = element_line(color = "gray85"),
+        axis.ticks = element_blank(),
+        plot.title = element_text(size = 18),
+        plot.subtitle = element_text(size = 14)) +
+  labs(x = "Pythagorean Wins Estimate",
+       y = "Actual Wins",
+       title = "The Chicago White Sox win total consistently\nresembles the Pythagorean wins estimate each year",
+       subtitle = "Pythagorean wins formula estimated using last 5 seasons of data")
+```
+
+In 2016, the team’s actual number of wins and its Pythagorean estimate agreed on 78 wins. However, 
+the Pythagorean expectation underestimated the number of wins in 2014 and 2015 by 2 and 3, respectively, 
+while it overestimated the number of wins for the two most recent seasons by 4 and 2, respectively. 
+Differences between the Pythagorean estimate and the actual number of wins could potentially be 
+attributed to how the team has performed in one-run games. The table below shows the team’s record 
+in one-run games over the last five seasons. While the Pythagorean estimates are off by only a few 
+games, we see that the when the team has underperformed the estimate, its record in one-run games is 
+typically worse. 
+
+```{r}
+bind_rows(season_data) %>% 
+  group_by(Tm, Year) %>%
+  filter(as.numeric(Gm) < 163) %>% 
+  filter(Tm == "CHW") %>% 
+  mutate(one_run_game = ifelse(R - as.numeric(RA) == 1, "one_run_win", 
+                               ifelse(R - as.numeric(RA) == -1, "one_run_loss", "other"))) %>% 
+  group_by(Year) %>% 
+  count(one_run_game) %>% 
+  spread(key = one_run_game, value = n) %>% 
+  mutate(record_one_run_games = paste0(one_run_win, "-", one_run_loss)) %>% 
+  select(Year, record_one_run_games) %>%
+  knitr::kable(col.names = c("Season", "Record (one-run games)"), align = c("l","c")) %>% 
+  kable_styling(full_width = F)
+```
+
